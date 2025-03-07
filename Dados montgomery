@@ -1,0 +1,207 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import cdist
+
+def rbf_kernel(x1, x2, sigma):
+    """Radial Basis Function (RBF) Kernel."""
+    return np.exp(-cdist(x1, x2, 'sqeuclidean') / (2 * sigma ** 2))
+
+
+def lsocsvm_fit(X, C, sigma):
+    """
+    Train Least Squares One-Class SVM using RBF kernel.
+    """
+    N = X.shape[0]
+    K = rbf_kernel(X, X, sigma)
+    H = K + np.eye(N) / C
+    e = np.ones((N, 1))
+    H_inv = np.linalg.inv(H)
+    alpha = H_inv @ e / (e.T @ H_inv @ e)
+    rho = 1 / (e.T @ H_inv @ e)
+    return alpha, rho, X
+
+
+def compute_control_limit(X_train, C, sigma, confidence_level=0.05, B=1000):
+    """
+    Compute the control limit h based on bootstrap statistics.
+    """
+    N = X_train.shape[0]
+    bootstrap_statistics = []
+
+    for _ in range(B):
+        # Generate a bootstrap sample
+        bootstrap_indices = np.random.choice(N, size=N, replace=True)
+        X_bootstrap = X_train[bootstrap_indices]
+
+        # Compute Gram matrix and alpha for the bootstrap sample
+        K_bootstrap = rbf_kernel(X_bootstrap, X_bootstrap, sigma)
+        H_bootstrap = K_bootstrap + np.eye(N) / C
+        e = np.ones((N, 1))
+        H_inv_bootstrap = np.linalg.inv(H_bootstrap)
+        alpha_bootstrap = H_inv_bootstrap @ e / (e.T @ H_inv_bootstrap @ e)
+        rho_bootstrap = 1 / (e.T @ H_inv_bootstrap @ e)
+
+        # Compute decision values for the bootstrap sample
+        decision_values = np.abs(K_bootstrap @ alpha_bootstrap - rho_bootstrap).flatten()
+        bootstrap_statistics.extend(decision_values)
+
+    # Sort the bootstrap statistics
+    bootstrap_statistics = np.sort(bootstrap_statistics)
+
+    # Compute the control limit h (100 * (1-confidence_level)-th percentile)
+    h_index = int((1 - confidence_level) * len(bootstrap_statistics)) - 1
+    return bootstrap_statistics[h_index]
+
+
+def plot_decision_boundary_with_h(X_train, alpha, rho, sigma, h, X_test=None, title="Decision Boundary"):
+    """
+    Plot the decision boundary for LSOCSVM with control limit h.
+    """
+    if X_train.shape[1] != 2:
+        raise ValueError("Plotting is only supported for 2D data.")
+
+    # Define the grid for the plot
+    x_min, x_max = X_train[:, 0].min() - 1, X_train[:, 0].max() + 1
+    y_min, y_max = X_train[:, 1].min() - 1, X_train[:, 1].max() + 1
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 300),
+                         np.linspace(y_min, y_max, 300))
+
+    # Create a grid of points
+    grid_points = np.c_[xx.ravel(), yy.ravel()]
+
+    # Compute decision values for the grid
+    K_grid = rbf_kernel(grid_points, X_train, sigma)
+    decision_values = np.abs(K_grid @ alpha - rho).reshape(xx.shape)
+
+    # Plot the decision boundary
+    plt.figure(figsize=(8, 6))
+    contour = plt.contourf(xx, yy, decision_values, levels=50, cmap="coolwarm", alpha=0.8)
+    plt.colorbar(contour, label="Decision Value f(x)")
+
+    # Highlight the decision boundary (where |f(x)| = h)
+    plt.contour(xx, yy, decision_values, levels=[h], colors="black", linewidths=2, linestyles="--")
+
+    # Scatter plot of the training data
+    plt.scatter(X_train[:, 0], X_train[:, 1], c="blue", edgecolor="k", label="Training Data")
+
+    # Overlay test data points if provided
+    if X_test is not None:
+        plt.scatter(X_test[:, 0], X_test[:, 1], c="red", edgecolor="k", label="Test Data", marker="x")
+
+    # Plot settings
+    plt.title(title)
+    plt.xlabel("Feature 1")
+    plt.ylabel("Feature 2")
+    plt.legend()
+    plt.grid(alpha=0.5)
+    plt.show()
+
+
+# Input data
+X = np.array([
+    [0.291681, -0.6034],
+    [0.294281, 0.491533],
+    [0.197337, 0.640937],
+    [0.839022, 1.469579],
+    [3.204876, 0.879172],
+    [0.203271, -2.29514],
+    [-0.99211, 1.670464],
+    [-1.70241, -0.36089],
+    [-0.14246, 0.560808],
+    [-0.99498, -0.31493],
+    [0.944697, 0.504711],
+    [-1.2195, -0.09129],
+    [2.608666, -0.42176],
+    [-0.12378, -0.08767],
+    [-1.10423, 1.472593],
+    [-0.27825, -0.94763],
+    [-2.65608, 0.135288],
+    [2.36528, -1.30494],
+    [0.411311, -0.21893],
+    [-2.14662, -1.17849],
+    [0.074196, 0.239359],
+    [-1.51756, -0.21121],
+    [1.408476, -0.87591],
+    [6.298001, -3.67398],
+    [3.802025, -1.99584],
+    [6.490673, -2.73143],
+    [2.738829, -1.37617],
+    [4.958747, -3.94851],
+    [5.678092, -3.85838],
+    [3.369657, -2.10878]
+])
+
+train_data = X[:20]
+test_data = X[20:]
+
+# Hyperparameters
+C = 2.0
+sigma = 1.0
+confidence_level = 0.05  # 95% confidence level
+
+# Train LSOCSVM
+alpha, rho, X_train = lsocsvm_fit(train_data, C, sigma)
+
+# Compute control limit h
+h = compute_control_limit(train_data, C, sigma, confidence_level=confidence_level)
+print("Control Limit h:", h)
+
+# Plot decision boundary
+plot_decision_boundary_with_h(train_data, alpha, rho, sigma, h, X_test=test_data)
+
+def lsocsvm_predict_with_h(alpha, rho, X_train, X_test, sigma, h):
+    """
+    Predict using trained LSOCSVM with a control limit h.
+
+    Args:
+        alpha: np.ndarray
+            Coefficients from training (N x 1).
+        rho: float
+            Offset (bias) term.
+        X_train: np.ndarray
+            Training data (N x d).
+        X_test: np.ndarray
+            Test data (M x d).
+        sigma: float
+            RBF kernel width parameter.
+        h: float
+            Control limit for decision boundary.
+
+    Returns:
+        predictions: np.ndarray
+            Predicted labels for the test data (1 for inliers, -1 for outliers).
+        decision_values: np.ndarray
+            Decision function values for the test data.
+    """
+    # Compute RBF kernel between test points and training points
+    K_test = rbf_kernel(X_test, X_train, sigma)
+
+    # Compute decision values
+    decision_values = np.abs(K_test @ alpha - rho)
+
+    # Classify based on the control limit h
+    predictions = np.where(decision_values < h, 1, -1)
+
+    return predictions, decision_values
+
+# Predict on test data
+predictions, decision_values = lsocsvm_predict_with_h(alpha, rho, train_data, test_data, sigma, h)
+
+outliers = decision_values > h
+
+print("Predictions (1 = Inlier, -1 = Outlier):", predictions)
+print("Decision Values:", decision_values)
+
+# Construir o gráfico
+plt.figure(figsize=(10, 6))
+plt.plot(range(len(decision_values)), decision_values, 'bo-', label="Decision Values")
+plt.axhline(y=h, color='red', linestyle='--', label="Control Limit (95%)")
+plt.scatter(np.where(outliers)[0], decision_values[outliers], color='red', label="Outliers", zorder=5)
+
+# Configurações do gráfico
+plt.title("Control Chart for LS-OCSVM")
+plt.xlabel("Test Sample Index")
+plt.ylabel("Decision Score")
+plt.legend(loc="upper left")
+plt.grid(True)
+plt.show()
