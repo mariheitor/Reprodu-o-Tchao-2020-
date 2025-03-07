@@ -1,0 +1,168 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import cdist
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+# Função do kernel RBF
+def rbf_kernel(x1, x2, sigma):
+    return np.exp(-cdist(x1, x2, 'sqeuclidean') / (2 * sigma ** 2))
+
+# Função de treinamento do LS-OCSVM
+def lsocsvm_fit(X, C, sigma):
+    N = X.shape[0]
+    K = rbf_kernel(X, X, sigma)
+    H = K + np.eye(N) / C
+    e = np.ones((N, 1))
+    H_inv = np.linalg.inv(H)
+    alpha = H_inv @ e / (e.T @ H_inv @ e)
+    rho = 1 / (e.T @ H_inv @ e)
+    return alpha, rho, X
+
+# Cálculo do limite de controle h
+def compute_control_limit(X_train, C, sigma, confidence_level=0.05, B=1000):
+    N = X_train.shape[0]
+    bootstrap_statistics = []
+    for _ in range(B):
+        bootstrap_indices = np.random.choice(N, size=N, replace=True)
+        X_bootstrap = X_train[bootstrap_indices]
+        K_bootstrap = rbf_kernel(X_bootstrap, X_bootstrap, sigma)
+        H_bootstrap = K_bootstrap + np.eye(N) / C
+        e = np.ones((N, 1))
+        H_inv_bootstrap = np.linalg.inv(H_bootstrap)
+        alpha_bootstrap = H_inv_bootstrap @ e / (e.T @ H_inv_bootstrap @ e)
+        rho_bootstrap = 1 / (e.T @ H_inv_bootstrap @ e)
+        decision_values = np.abs(K_bootstrap @ alpha_bootstrap - rho_bootstrap).flatten()
+        bootstrap_statistics.extend(decision_values)
+    bootstrap_statistics = np.sort(bootstrap_statistics)
+    h_index = int((1 - confidence_level) * len(bootstrap_statistics)) - 1
+    return bootstrap_statistics[h_index]
+
+# Predição com limite de controle h
+def lsocsvm_predict_with_h(alpha, rho, X_train, X_test, sigma, h):
+    K_test = rbf_kernel(X_test, X_train, sigma)
+    decision_values = np.abs(K_test @ alpha - rho)
+    predictions = np.where(decision_values < h, 1, -1)
+    return predictions, decision_values
+
+# Carregar o dataset
+url = "https://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/wdbc.data"
+columns = ['ID', 'Diagnosis'] + [f'Feature_{i}' for i in range(1, 31)]
+data = pd.read_csv(url, header=None, names=columns)
+
+# Pré-processamento
+X = data.iloc[:, 2:].values
+Y = data['Diagnosis'].map({'M': 1, 'B': -1}).values
+
+# Normalizar as features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Reduzir dimensões para 2D com PCA
+pca = PCA(n_components=2)
+X_pca = pca.fit_transform(X_scaled)
+
+# Separar dados de treino e teste
+benign_indices = np.where(Y == -1)[0]
+malignant_indices = np.where(Y == 1)[0]
+X_train = X_pca[benign_indices[:80]]
+Y_train = Y[benign_indices[:80]]
+test_benign = benign_indices[-5:]
+test_malignant = malignant_indices[:8]
+test_indices = np.concatenate([test_benign, test_malignant])
+X_test = X_pca[test_indices]
+Y_test = Y[test_indices]
+
+# Seleção de parâmetros (Leave-One-Out)
+def tune_parameters(train_data):
+    C_values = [0.1, 1, 10, 100]
+    sigma_values = [0.1, 1, 10]
+    best_C, best_sigma = None, None
+    lowest_error = float("inf")
+
+    for C in C_values:
+        for sigma in sigma_values:
+            loo = LeaveOneOut()
+            errors = []
+
+            for train_idx, test_idx in loo.split(train_data):
+                X_train, X_test = train_data[train_idx], train_data[test_idx]
+                K_train = rbf_kernel(X_train, X_train, gamma=1/(2 * sigma**2))
+                K_test = rbf_kernel(X_train, X_test, gamma=1/(2 * sigma**2))
+
+                alpha = calculate_alpha(K_train, C)
+                rho = np.mean(K_train @ alpha)  # Bias (rho)
+                prediction = ls_ocsvm_decision(K_test.T, alpha, rho)
+
+                errors.append(mean_squared_error([1], np.sign(prediction)))
+
+            avg_error = np.mean(errors)
+
+            if avg_error < lowest_error:
+                lowest_error = avg_error
+                best_C, best_sigma = C, sigma
+
+    return best_C, best_sigma
+
+# Treinar LSOCSVM
+
+confidence_level = 0.05
+alpha, rho, X_train = lsocsvm_fit(X_train,C, sigma)
+
+# Calcular o limite de controle h
+h = compute_control_limit(X_train, C, sigma, confidence_level)
+print("Control Limit h:", h)
+
+# Predição no conjunto de teste
+predictions, decision_values = lsocsvm_predict_with_h(alpha, rho, X_train, X_test, sigma, h)
+outliers = decision_values > h
+
+print("Predictions (1 = Inlier, -1 = Outlier):", predictions)
+print("Decision Values:", decision_values)
+
+# Plot decision boundary
+def plot_decision_boundary_with_h(X_train, alpha, rho, sigma, h, X_test=None, title="Decision Boundary"):
+    if X_train.shape[1] != 2:
+        raise ValueError("Plotting is only supported for 2D data.")
+
+    x_min, x_max = X_train[:, 0].min() - 1, X_train[:, 0].max() + 1
+    y_min, y_max = X_train[:, 1].min() - 1, X_train[:, 1].max() + 1
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 300), np.linspace(y_min, y_max, 300))
+    grid_points = np.c_[xx.ravel(), yy.ravel()]
+
+    K_grid = rbf_kernel(grid_points, X_train, sigma)
+    decision_values = np.abs(K_grid @ alpha - rho).reshape(xx.shape)
+
+    plt.figure(figsize=(8, 6))
+    contour = plt.contourf(xx, yy, decision_values, levels=50, cmap="coolwarm", alpha=0.5)
+    plt.colorbar(contour, label="Decision Value f(x)")
+    plt.contour(xx, yy, decision_values, levels=[h], colors="black", linewidths=2, linestyles="--")
+    plt.scatter(X_train[:, 0], X_train[:, 1], c="blue", edgecolor="k", label="Training Data")
+
+    if X_test is not None:
+        plt.scatter(X_test[:, 0], X_test[:, 1], c="red", edgecolor="k", label="Test Data", marker="x")
+
+    plt.title(title)
+    plt.xlabel("Feature 1")
+    plt.ylabel("Feature 2")
+    plt.legend()
+    plt.grid(alpha=0.5)
+    plt.show()
+
+# Chamar a função de plotagem
+plot_decision_boundary_with_h(X_train, alpha, rho, sigma, h, X_test)
+
+# Plot do gráfico de controle
+plt.figure(figsize=(10, 6))
+plt.plot(range(len(decision_values)), decision_values, 'bo-', label="Decision Values")
+plt.axhline(y=h, color='red', linestyle='--', label="Control Limit (95%)")
+plt.scatter(np.where(outliers)[0], decision_values[outliers], color='red', label="Outliers", zorder=5)
+plt.title("Control Chart for LS-OCSVM")
+plt.xlabel("Test Sample Index")
+plt.ylabel("Decision Score")
+plt.legend(loc="upper left")
+plt.grid(True)
+plt.show()
+
+print(C,sigma)
